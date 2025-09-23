@@ -46,7 +46,7 @@ COL = {
     "po_date": ["발주일자","발주일","PO_DATE","주문일자"],
     "item":    ["품목명","품목","내역","ITEM_NAME"],
     "vendor":  ["거래처명","거래처","공급사"],
-    "manager": ["담당자","담당","담당자명","담당사원","담당자ID"],
+    "pgroup":  ["구매그룹","구매그룹명","구매 그룹","Buyer Group","구매그룹코드"],
     "due":     ["발주납기일자","납기일자","납기일","DUE_DATE"],
     "rcv_date":["입고일자","입고일","RCV_DATE"],
     "po_qty":  ["발주수량","PO수량","발주 수량"],
@@ -265,11 +265,11 @@ def build_base(df: pd.DataFrame) -> pd.DataFrame:
     base["발주번호"]    = df[m["po_no"]]   if m["po_no"]   else ""
     base["품목명"]      = df[m["item"]]    if m["item"]    else ""
     base["거래처명"]    = df[m["vendor"]]  if m["vendor"]  else ""
-    if m["manager"]:
-        mgr = df[m["manager"]].fillna("").astype(str).str.strip()
-        base["담당자"] = mgr
+    if m["pgroup"]:
+        pg = df[m["pgroup"]].fillna("").astype(str).str.strip()
+        base["구매그룹"] = pg
     else:
-        base["담당자"] = ""
+        base["구매그룹"] = ""
     base["발주일자"]    = pd.to_datetime(df[m["po_date"]],  errors="coerce") if m["po_date"]  else pd.NaT
     base["발주납기일자"]= pd.to_datetime(df[m["due"]],      errors="coerce") if m["due"]      else pd.NaT
     base["입고일자"]    = pd.to_datetime(df[m["rcv_date"]], errors="coerce") if m["rcv_date"] else pd.NaT
@@ -339,7 +339,7 @@ def detail_at(base: pd.DataFrame, cutoff: date) -> pd.DataFrame:
     D = base.loc[mask].copy()
     if D.empty: return D
     D["지연일수"] = (cutoff - pd.to_datetime(D["발주납기일자"])).dt.days
-    cols = ["제품군","발주번호","거래처명","담당자","품목명","발주일자","발주납기일자",
+    cols = ["제품군","발주번호","거래처명","구매그룹","품목명","발주일자","발주납기일자",
             "입고일자","발주수량","입고수량","미입고수량","입고구분","지연일수"]
     return D[cols].sort_values(["지연일수","발주납기일자"], ascending=[False, True])
 
@@ -506,11 +506,11 @@ with c1:
 with c2:
     vendors = st.multiselect("거래처명", sorted(base["거래처명"].astype(str).dropna().unique().tolist())[:5000])
 with c3:
-    mgr_opts = sorted(
-        x for x in base["담당자"].fillna("").astype(str).str.strip().unique().tolist()
+    pg_opts = sorted(
+        x for x in base["구매그룹"].fillna("").astype(str).str.strip().unique().tolist()
         if x and x.lower() != "nan"
     )
-    managers = st.multiselect("담당자", mgr_opts)
+    purchase_groups = st.multiselect("구매그룹", pg_opts)
 with c4:
     statuses = st.multiselect("입고구분", sorted(base["입고구분"].astype(str).dropna().unique().tolist()))
 with c5:
@@ -519,8 +519,8 @@ with c5:
 flt = base.copy()
 if prods:    flt = flt[flt["제품군"].isin(prods)]
 if vendors:  flt = flt[flt["거래처명"].astype(str).isin(vendors)]
-if managers:
-    flt = flt[flt["담당자"].fillna("").astype(str).str.strip().isin(managers)]
+if purchase_groups:
+    flt = flt[flt["구매그룹"].fillna("").astype(str).str.strip().isin(purchase_groups)]
 if statuses: flt = flt[flt["입고구분"].astype(str).isin(statuses)]
 if state_std:flt = flt[flt["상태_표준"].isin(state_std)]
 
