@@ -15,6 +15,14 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+
+def halt_app():
+    """Safely stop execution both in Streamlit runtime and bare execution."""
+    try:
+        st.stop()
+    except Exception:
+        raise SystemExit(0)
+
 # ───────────────────────── 기본 설정 ─────────────────────────
 st.set_page_config(page_title="미입고 KPI 대시보드(Pro)", page_icon="📦", layout="wide")
 
@@ -38,6 +46,7 @@ COL = {
     "po_date": ["발주일자","발주일","PO_DATE","주문일자"],
     "item":    ["품목명","품목","내역","ITEM_NAME"],
     "vendor":  ["거래처명","거래처","공급사"],
+    "pgroup":  ["구매그룹","구매그룹명","구매 그룹","Buyer Group","구매그룹코드"],
     "due":     ["발주납기일자","납기일자","납기일","DUE_DATE"],
     "rcv_date":["입고일자","입고일","RCV_DATE"],
     "po_qty":  ["발주수량","PO수량","발주 수량"],
@@ -256,6 +265,11 @@ def build_base(df: pd.DataFrame) -> pd.DataFrame:
     base["발주번호"]    = df[m["po_no"]]   if m["po_no"]   else ""
     base["품목명"]      = df[m["item"]]    if m["item"]    else ""
     base["거래처명"]    = df[m["vendor"]]  if m["vendor"]  else ""
+    if m["pgroup"]:
+        pg = df[m["pgroup"]].fillna("").astype(str).str.strip()
+        base["구매그룹"] = pg
+    else:
+        base["구매그룹"] = ""
     base["발주일자"]    = pd.to_datetime(df[m["po_date"]],  errors="coerce") if m["po_date"]  else pd.NaT
     base["발주납기일자"]= pd.to_datetime(df[m["due"]],      errors="coerce") if m["due"]      else pd.NaT
     base["입고일자"]    = pd.to_datetime(df[m["rcv_date"]], errors="coerce") if m["rcv_date"] else pd.NaT
@@ -325,7 +339,7 @@ def detail_at(base: pd.DataFrame, cutoff: date) -> pd.DataFrame:
     D = base.loc[mask].copy()
     if D.empty: return D
     D["지연일수"] = (cutoff - pd.to_datetime(D["발주납기일자"])).dt.days
-    cols = ["제품군","발주번호","거래처명","품목명","발주일자","발주납기일자",
+    cols = ["제품군","발주번호","거래처명","구매그룹","품목명","발주일자","발주납기일자",
             "입고일자","발주수량","입고수량","미입고수량","입고구분","지연일수"]
     return D[cols].sort_values(["지연일수","발주납기일자"], ascending=[False, True])
 
@@ -473,28 +487,40 @@ if hist:
             raw_df = read_path(UPLOAD_DIR / chosen["path"])
         except Exception as e:
             st.error(f"히스토리 파일 읽기 오류: {e}")
-            st.stop()
+            halt_app()
 else:
     st.info("좌측에서 파일을 업로드하거나 히스토리에서 선택해 주세요.")
-    st.stop()
+    halt_app()
 
 # ───────────────────────── 표준화·필터·지표 ─────────────────────────
+if raw_df is None:
+    st.error("데이터를 불러오지 못했습니다. 파일을 업로드 후 다시 시도해 주세요.")
+    halt_app()
+
 base = build_base(raw_df.copy())
 
 st.subheader("🔎 필터")
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5 = st.columns(5)
 with c1:
     prods = st.multiselect("제품군", sorted(base["제품군"].dropna().unique().tolist()))
 with c2:
     vendors = st.multiselect("거래처명", sorted(base["거래처명"].astype(str).dropna().unique().tolist())[:5000])
 with c3:
-    statuses = st.multiselect("입고구분", sorted(base["입고구분"].astype(str).dropna().unique().tolist()))
+    pg_opts = sorted(
+        x for x in base["구매그룹"].fillna("").astype(str).str.strip().unique().tolist()
+        if x and x.lower() != "nan"
+    )
+    purchase_groups = st.multiselect("구매그룹", pg_opts)
 with c4:
+    statuses = st.multiselect("입고구분", sorted(base["입고구분"].astype(str).dropna().unique().tolist()))
+with c5:
     state_std = st.multiselect("상태(표준)", ["입고완료","부분입고","미입고","미표시","기타"])
 
 flt = base.copy()
 if prods:    flt = flt[flt["제품군"].isin(prods)]
 if vendors:  flt = flt[flt["거래처명"].astype(str).isin(vendors)]
+if purchase_groups:
+    flt = flt[flt["구매그룹"].fillna("").astype(str).str.strip().isin(purchase_groups)]
 if statuses: flt = flt[flt["입고구분"].astype(str).isin(statuses)]
 if state_std:flt = flt[flt["상태_표준"].isin(state_std)]
 
