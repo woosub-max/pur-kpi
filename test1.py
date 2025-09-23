@@ -15,6 +15,14 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+
+def halt_app():
+    """Safely stop execution both in Streamlit runtime and bare execution."""
+    try:
+        st.stop()
+    except Exception:
+        raise SystemExit(0)
+
 # ───────────────────────── 기본 설정 ─────────────────────────
 st.set_page_config(page_title="미입고 KPI 대시보드(Pro)", page_icon="📦", layout="wide")
 
@@ -479,12 +487,16 @@ if hist:
             raw_df = read_path(UPLOAD_DIR / chosen["path"])
         except Exception as e:
             st.error(f"히스토리 파일 읽기 오류: {e}")
-            st.stop()
+            halt_app()
 else:
     st.info("좌측에서 파일을 업로드하거나 히스토리에서 선택해 주세요.")
-    st.stop()
+    halt_app()
 
 # ───────────────────────── 표준화·필터·지표 ─────────────────────────
+if raw_df is None:
+    st.error("데이터를 불러오지 못했습니다. 파일을 업로드 후 다시 시도해 주세요.")
+    halt_app()
+
 base = build_base(raw_df.copy())
 
 st.subheader("🔎 필터")
