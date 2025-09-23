@@ -7,7 +7,7 @@
 - 본문 로직은 기존 test2.py를 토대로 보강(파일 저장/불러오기만 추가)
 """
 
-import io, os, csv, calendar, time, json, re
+import io, os, csv, calendar, time, json, re, smtplib, ssl
 from pathlib import Path
 from datetime import date, datetime
 import numpy as np
@@ -343,6 +343,49 @@ def detail_at(base: pd.DataFrame, cutoff: date) -> pd.DataFrame:
             "입고일자","발주수량","입고수량","미입고수량","입고구분","지연일수"]
     return D[cols].sort_values(["지연일수","발주납기일자"], ascending=[False, True])
 
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _smtp_config() -> dict:
+    try:
+        raw = st.secrets["smtp"]
+        if isinstance(raw, dict):
+            return raw
+        return dict(raw)
+    except Exception:
+        return {}
+
+
+def format_vendor_details_for_mail(df: pd.DataFrame) -> str:
+    if df is None or df.empty:
+        return "선택한 거래처의 미입고 건이 없습니다."
+    buf = io.StringIO()
+    df.to_csv(buf, index=False)
+    return buf.getvalue()
+
+
+def send_mail_via_smtp(to_email: str, subject: str, body: str):
+    smtp_conf = _smtp_config()
+    host = smtp_conf.get("host")
+    if not host:
+        raise RuntimeError("SMTP 설정(host)이 존재하지 않습니다. st.secrets['smtp']를 확인하세요.")
+
+    port = smtp_conf.get("port", 587)
+    username = smtp_conf.get("username")
+    password = smtp_conf.get("password")
+    use_starttls = smtp_conf.get("starttls", True)
+    from_addr = smtp_conf.get("from") or username or f"no-reply@{host}"
+
+    message = f"Subject: {subject}\nTo: {to_email}\nFrom: {from_addr}\n\n{body}"
+
+    with smtplib.SMTP(host, port, timeout=10) as smtp:
+        if use_starttls:
+            smtp.starttls(context=ssl.create_default_context())
+        if username and password:
+            smtp.login(username, password)
+        smtp.sendmail(from_addr, [to_email], message.encode("utf-8"))
+
+
 # ─────────────── 엑셀 보고서 생성 (원본 test2.py 형식 유지) ───────────────
 def build_excel(summary, raw_df, prev_eom, curr_eom, det_prev, det_curr) -> bytes:
     from openpyxl import Workbook
@@ -601,6 +644,9 @@ m[3].metric("당월(A)", f"{int(total_row['당월(A)']):,}")
 m[4].metric("신규(B)", f"{int(total_row['신규(B)']):,}")
 m[5].metric("적기입고율", f"{float(total_row['적기입고율(당월말)']):.1%}")
 
+detail_prev = detail_at(flt, prev_eom)
+detail_curr = detail_at(flt, curr_eom)
+
 st.subheader("📈 시각화")
 curr_over_mask = backlog_by_cutoff(flt, curr_eom)
 bar_df = flt.loc[curr_over_mask].groupby("제품군").size().reset_index(name="미입고(당월말)")
@@ -615,14 +661,81 @@ vendor_df = vendor_df.sort_values("미입고(당월말)", ascending=False).head(
 st.plotly_chart(px.bar(vendor_df, x="거래처명", y="미입고(당월말)", text_auto=True, title="거래처 Top 미입고"),
                 use_container_width=True)
 
+st.session_state.setdefault("mail_modal_open", False)
+st.session_state.setdefault("mail_selected_vendor", None)
+st.session_state.setdefault("mail_recipient", "")
+st.session_state.setdefault("mail_body", "")
+
+vendor_options = vendor_df["거래처명"].tolist()
+if st.session_state.get("mail_modal_open") and st.session_state.get("mail_selected_vendor") not in vendor_options:
+    st.session_state["mail_modal_open"] = False
+
+selector_col, button_col = st.columns([4, 1])
+selected_vendor = None
+with selector_col:
+    if vendor_options:
+        default_index = 0
+        prev_selected = st.session_state.get("mail_selected_vendor")
+        if prev_selected in vendor_options:
+            default_index = vendor_options.index(prev_selected)
+        selected_vendor = st.selectbox(
+            "미입고 거래처 선택",
+            vendor_options,
+            index=default_index,
+            key="mail_vendor_select",
+        )
+    else:
+        st.selectbox(
+            "미입고 거래처 선택",
+            options=["선택 가능한 거래처가 없습니다."],
+            index=0,
+            key="mail_vendor_select_disabled",
+            disabled=True,
+        )
+with button_col:
+    send_mail_clicked = st.button("메일발송", use_container_width=True, disabled=not vendor_options)
+
+if selected_vendor:
+    st.session_state["mail_selected_vendor"] = selected_vendor
+
+if send_mail_clicked and selected_vendor:
+    st.session_state["mail_modal_open"] = True
+    vendor_detail = detail_curr[detail_curr["거래처명"] == selected_vendor]
+    st.session_state["mail_body"] = format_vendor_details_for_mail(vendor_detail)
+    st.session_state["mail_recipient"] = ""
+
+if st.session_state.get("mail_modal_open") and st.session_state.get("mail_selected_vendor"):
+    modal_vendor = st.session_state.get("mail_selected_vendor")
+    cutoff_label = pd.to_datetime(curr_eom).strftime("%Y-%m-%d")
+    with st.modal("미입고 메일 발송"):
+        st.markdown(f"**거래처:** {modal_vendor}")
+        email_value = st.text_input("수신자 이메일", key="mail_recipient")
+        body_value = st.text_area("메일 본문", key="mail_body", height=240)
+        if st.button("발송", key="mail_send_button"):
+            email_to_send = (email_value or "").strip()
+            body_to_send = body_value.strip()
+            if not email_to_send:
+                st.error("수신자 이메일을 입력하세요.")
+            elif not EMAIL_PATTERN.match(email_to_send):
+                st.error("유효한 이메일 주소를 입력하세요.")
+            elif not body_to_send:
+                st.error("메일 본문이 비어 있습니다.")
+            else:
+                try:
+                    subject = f"[미입고 알림] {modal_vendor} - {cutoff_label}"
+                    send_mail_via_smtp(email_to_send, subject, body_value)
+                except Exception as e:
+                    st.error(f"메일 발송 실패: {e}")
+                else:
+                    st.success("메일을 발송했습니다.")
+                    st.session_state["mail_modal_open"] = False
+
 status_df = flt["상태_표준"].value_counts().reset_index()
 status_df.columns = ["상태","건수"]
 st.plotly_chart(px.pie(status_df, names="상태", values="건수", hole=0.5, title="상태 분포"),
                 use_container_width=True)
 
 st.subheader("📋 당월말 미입고 상세")
-detail_prev = detail_at(flt, prev_eom)
-detail_curr = detail_at(flt, curr_eom)
 st.dataframe(detail_curr.head(200), use_container_width=True)
 
 st.subheader("📑 월말 요약표")
