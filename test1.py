@@ -516,6 +516,50 @@ with c4:
 with c5:
     state_std = st.multiselect("상태(표준)", ["입고완료","부분입고","미입고","미표시","기타"])
 
+due_range = None
+order_range = None
+due_range_default = None
+order_range_default = None
+date_cols = st.columns(2)
+with date_cols[0]:
+    due_series = base["발주납기일자"].dropna()
+    if not due_series.empty:
+        due_range_default = (due_series.min().date(), due_series.max().date())
+        due_range = st.date_input(
+            "발주납기일자 범위",
+            value=due_range_default,
+            min_value=due_range_default[0],
+            max_value=due_range_default[1],
+            format="YYYY-MM-DD",
+        )
+    else:
+        st.date_input(
+            "발주납기일자 범위",
+            value=(date.today(), date.today()),
+            format="YYYY-MM-DD",
+            disabled=True,
+            help="발주납기일자가 없어 필터를 사용할 수 없습니다.",
+        )
+with date_cols[1]:
+    order_series = base["발주일자"].dropna()
+    if not order_series.empty:
+        order_range_default = (order_series.min().date(), order_series.max().date())
+        order_range = st.date_input(
+            "발주일자 범위",
+            value=order_range_default,
+            min_value=order_range_default[0],
+            max_value=order_range_default[1],
+            format="YYYY-MM-DD",
+        )
+    else:
+        st.date_input(
+            "발주일자 범위",
+            value=(date.today(), date.today()),
+            format="YYYY-MM-DD",
+            disabled=True,
+            help="발주일자가 없어 필터를 사용할 수 없습니다.",
+        )
+
 flt = base.copy()
 if prods:    flt = flt[flt["제품군"].isin(prods)]
 if vendors:  flt = flt[flt["거래처명"].astype(str).isin(vendors)]
@@ -523,6 +567,26 @@ if purchase_groups:
     flt = flt[flt["구매그룹"].fillna("").astype(str).str.strip().isin(purchase_groups)]
 if statuses: flt = flt[flt["입고구분"].astype(str).isin(statuses)]
 if state_std:flt = flt[flt["상태_표준"].isin(state_std)]
+if due_range_default and isinstance(due_range, (list, tuple)) and len(due_range) == 2:
+    due_start, due_end = due_range
+    if due_start and due_end:
+        due_start_ts = pd.to_datetime(due_start)
+        due_end_ts = pd.to_datetime(due_end)
+        due_mask = flt["발주납기일자"].notna() & flt["발주납기일자"].between(due_start_ts, due_end_ts)
+        if tuple(due_range) == due_range_default:
+            flt = flt[due_mask | flt["발주납기일자"].isna()]
+        else:
+            flt = flt[due_mask]
+if order_range_default and isinstance(order_range, (list, tuple)) and len(order_range) == 2:
+    order_start, order_end = order_range
+    if order_start and order_end:
+        order_start_ts = pd.to_datetime(order_start)
+        order_end_ts = pd.to_datetime(order_end)
+        order_mask = flt["발주일자"].notna() & flt["발주일자"].between(order_start_ts, order_end_ts)
+        if tuple(order_range) == order_range_default:
+            flt = flt[order_mask | flt["발주일자"].isna()]
+        else:
+            flt = flt[order_mask]
 
 st.caption(f"필터 적용 결과: {len(flt):,} 행")
 
