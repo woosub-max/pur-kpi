@@ -883,6 +883,9 @@ else:
             candidate = source_email_map.get(vendor, "")
         resolved_email_map[vendor] = candidate.strip()
 
+    # 메일 발송 및 프리뷰에 사용될 DataFrame에도 최종 이메일을 반영
+    mail_df["거래처이메일"] = mail_df["거래처명"].map(resolved_email_map).fillna("")
+
     st.subheader("이메일 템플릿")
     default_subject = "[미입고 안내] {{vendor_name}} - {{today}} 기준"
     default_body = (
