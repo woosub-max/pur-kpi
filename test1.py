@@ -744,8 +744,30 @@ else:
         .sort_values("건수", ascending=False)
     )
 
-    st.markdown("**거래처별 미입고 건수**")
-    st.dataframe(vendor_groups, use_container_width=True)
+    st.markdown("**거래처별 미입고 건수 / 이메일 입력**")
+    if "vendor_email_overrides" not in st.session_state:
+        st.session_state.vendor_email_overrides = {}
+
+    editable_df = vendor_groups.copy()
+    editable_df["이메일"] = editable_df["거래처명"].map(st.session_state.vendor_email_overrides).fillna(editable_df["거래처이메일"])
+    editable_df = editable_df[["거래처명", "이메일", "건수", "거래처이메일"]]
+
+    edited_df = st.data_editor(
+        editable_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "거래처명": st.column_config.TextColumn(disabled=True),
+            "건수": st.column_config.NumberColumn(disabled=True),
+            "거래처이메일": st.column_config.TextColumn(disabled=True, label="원본 이메일"),
+            "이메일": st.column_config.TextColumn(help="이메일이 없거나 수정이 필요한 경우 입력하세요."),
+        },
+    )
+
+    for _, row in edited_df.iterrows():
+        email_val = str(row.get("이메일", "")).strip()
+        if email_val:
+            st.session_state.vendor_email_overrides[row["거래처명"]] = email_val
 
     st.subheader("이메일 템플릿")
     default_subject = "[미입고 안내] {{vendor_name}} - {{today}} 기준"
@@ -781,7 +803,9 @@ else:
     def _send_to_targets(targets: List[str]):
         for vendor in targets:
             vendor_df = mail_df[mail_df["거래처명"] == vendor]
-            email_addr = vendor_df["거래처이메일"].dropna().astype(str).str.strip().iloc[0] if not vendor_df.empty else ""
+            email_addr = st.session_state.vendor_email_overrides.get(vendor)
+            if not email_addr:
+                email_addr = vendor_df["거래처이메일"].dropna().astype(str).str.strip().iloc[0] if not vendor_df.empty else ""
             status, detail = "성공", ""
             if not is_valid_email(email_addr):
                 status, detail = "건너뜀", "이메일 누락/형식 오류"
