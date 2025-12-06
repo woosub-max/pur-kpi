@@ -756,6 +756,7 @@ else:
         editable_df,
         use_container_width=True,
         hide_index=True,
+        key="vendor_email_editor",
         column_config={
             "거래처명": st.column_config.TextColumn(disabled=True),
             "건수": st.column_config.NumberColumn(disabled=True),
@@ -764,10 +765,14 @@ else:
         },
     )
 
+    email_map: Dict[str, str] = {}
     for _, row in edited_df.iterrows():
         email_val = str(row.get("이메일", "")).strip()
         if email_val:
             st.session_state.vendor_email_overrides[row["거래처명"]] = email_val
+            email_map[row["거래처명"]] = email_val
+        else:
+            email_map[row["거래처명"]] = str(row.get("거래처이메일", "")).strip()
 
     st.subheader("이메일 템플릿")
     default_subject = "[미입고 안내] {{vendor_name}} - {{today}} 기준"
@@ -803,7 +808,7 @@ else:
     def _send_to_targets(targets: List[str]):
         for vendor in targets:
             vendor_df = mail_df[mail_df["거래처명"] == vendor]
-            email_addr = st.session_state.vendor_email_overrides.get(vendor)
+            email_addr = email_map.get(vendor) or st.session_state.vendor_email_overrides.get(vendor)
             if not email_addr:
                 email_addr = vendor_df["거래처이메일"].dropna().astype(str).str.strip().iloc[0] if not vendor_df.empty else ""
             status, detail = "성공", ""
