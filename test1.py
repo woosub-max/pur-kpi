@@ -8,12 +8,16 @@
 """
 
 import io, os, csv, calendar, time, json, re
+from email.message import EmailMessage
 from pathlib import Path
 from datetime import date, datetime
+from typing import Dict, List
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
 
 
 def halt_app():
@@ -29,6 +33,7 @@ st.set_page_config(page_title="미발주/미입고 대시보드(Pro)", page_icon
 ROOT_DIR   = Path(__file__).parent if "__file__" in globals() else Path(".")
 UPLOAD_DIR = ROOT_DIR / "uploads"
 MANIFEST   = UPLOAD_DIR / "manifest.json"
+VENDOR_EMAIL_FILE = ROOT_DIR / "vendor_emails.csv"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 def month_end(d: date) -> date:
@@ -52,6 +57,7 @@ COL = {
     "po_qty":  ["발주수량","PO수량","발주 수량"],
     "rcv_qty": ["입고수량","RCV수량","검사합격수량","실입고수량"],
     "status":  ["입고구분","입고상태","입고상태명","진행상태"],
+    "email":   ["이메일","이메일주소","거래처이메일","공급사메일","메일","Email","email"],
 }
 COMPLETE = {"입고완료","완료"}
 PARTIAL  = {"부분입고","부분","부분완료"}
@@ -265,6 +271,7 @@ def build_base(df: pd.DataFrame) -> pd.DataFrame:
     base["발주번호"]    = df[m["po_no"]]   if m["po_no"]   else ""
     base["품목명"]      = df[m["item"]]    if m["item"]    else ""
     base["거래처명"]    = df[m["vendor"]]  if m["vendor"]  else ""
+    base["거래처이메일"] = df[m["email"]].astype(str).str.strip() if m["email"] else ""
     if m["pgroup"]:
         pg = df[m["pgroup"]].fillna("").astype(str).str.strip()
         base["구매그룹"] = pg
@@ -339,9 +346,160 @@ def detail_at(base: pd.DataFrame, cutoff: date) -> pd.DataFrame:
     D = base.loc[mask].copy()
     if D.empty: return D
     D["지연일수"] = (cutoff - pd.to_datetime(D["발주납기일자"])).dt.days
-    cols = ["제품군","발주번호","거래처명","구매그룹","품목명","발주일자","발주납기일자",
-            "입고일자","발주수량","입고수량","미입고수량","입고구분","지연일수"]
+    cols = [
+        "제품군","발주번호","거래처명","거래처이메일","구매그룹","품목명","발주일자","발주납기일자",
+        "입고일자","발주수량","입고수량","미입고수량","입고구분","지연일수",
+    ]
+    cols = [c for c in cols if c in D.columns]
     return D[cols].sort_values(["지연일수","발주납기일자"], ascending=[False, True])
+
+
+# ─────────────── 이메일 유틸 ───────────────
+def is_valid_email(address: str) -> bool:
+    if not isinstance(address, str):
+        return False
+    address = address.strip()
+    if not address:
+        return False
+    return re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", address) is not None
+
+
+def _norm_vendor(name: str) -> str:
+    if not isinstance(name, str):
+        return ""
+    s = name.lower()
+    s = re.sub(r"\s+", "", s)
+    s = s.replace("주식회사", "").replace("㈜", "")
+    s = re.sub(r"^\(주\)", "", s)
+    s = re.sub(r"[^가-힣a-z0-9]", "", s)
+    return s
+
+
+def load_vendor_email_master() -> pd.DataFrame:
+    if not VENDOR_EMAIL_FILE.exists():
+        return pd.DataFrame(columns=["vendor_name", "vendor_email"])
+    try:
+        df = pd.read_csv(VENDOR_EMAIL_FILE)
+        if "vendor_name" not in df.columns and df.shape[1] >= 1:
+            df.rename(columns={df.columns[0]: "vendor_name"}, inplace=True)
+        if "vendor_email" not in df.columns and df.shape[1] >= 2:
+            df.rename(columns={df.columns[1]: "vendor_email"}, inplace=True)
+        cols = [c for c in ["vendor_name", "vendor_email"] if c in df.columns]
+        if len(cols) < 2:
+            return pd.DataFrame(columns=["vendor_name", "vendor_email"])
+        return df[cols].fillna("")
+    except Exception:
+        return pd.DataFrame(columns=["vendor_name", "vendor_email"])
+
+
+def build_vendor_email_lookup(master_df: pd.DataFrame) -> Dict[str, str]:
+    lookup: Dict[str, str] = {}
+    for _, row in master_df.iterrows():
+        nm = _norm_vendor(str(row.get("vendor_name", "")))
+        em = str(row.get("vendor_email", "")).strip()
+        if nm and em:
+            lookup[nm] = em
+    secret_map = st.secrets.get("VENDOR_EMAILS", {}) if hasattr(st, "secrets") else {}
+    if isinstance(secret_map, dict):
+        for k, v in secret_map.items():
+            nm = _norm_vendor(str(k))
+            em = str(v).strip()
+            if nm and em:
+                lookup[nm] = em
+    return lookup
+
+
+def send_via_sendgrid(to_addr: str, subject: str, html_body: str) -> str:
+    """SendGrid로 메일 전송 (성공 시 OK 반환)"""
+    if not is_valid_email(to_addr):
+        raise ValueError(f"잘못된 이메일 주소: {to_addr}")
+
+    api_key = st.secrets.get("SENDGRID_API_KEY") or os.environ.get("SENDGRID_API_KEY")
+    sender = (
+        st.secrets.get("SENDER_EMAIL")
+        or os.environ.get("SENDER_EMAIL")
+        or st.secrets.get("SMTP_USER")
+        or os.environ.get("SMTP_USER")
+    )
+
+    if not api_key:
+        raise RuntimeError("SENDGRID_API_KEY가 설정되지 않았습니다.")
+    if not sender:
+        raise RuntimeError("SENDER_EMAIL이 설정되지 않았습니다.")
+
+    msg = Mail(from_email=sender, to_emails=[to_addr], subject=subject, html_content=html_body)
+    resp = SendGridAPIClient(api_key).send(msg)
+    if resp.status_code >= 300:
+        raise RuntimeError(f"SendGrid 응답 오류: {resp.status_code}")
+    return "OK"
+
+
+def build_items_table(df: pd.DataFrame) -> str:
+    if df.empty:
+        return "<p>미입고 내역이 없습니다.</p>"
+    view_cols = [
+        c for c in ["발주번호","품목명","발주수량","미입고수량","발주납기일자","지연일수"]
+        if c in df.columns
+    ]
+    disp = df[view_cols].copy()
+    rename_map = {
+        "발주번호": "발주번호",
+        "품목명": "품목명",
+        "발주수량": "발주수량",
+        "미입고수량": "미입고수량",
+        "발주납기일자": "납기일자",
+        "지연일수": "지연(일)",
+    }
+    disp.rename(columns=rename_map, inplace=True)
+    return disp.to_html(index=False, border=1, justify="center")
+
+
+def render_template(template: str, placeholders: Dict[str, str]) -> str:
+    html = template
+    for key, val in placeholders.items():
+        html = html.replace(f"{{{{{key}}}}}", val)
+    return html
+
+
+def send_email(to_addr: str, subject: str, html_body: str, dry_run: bool = True) -> None:
+    if dry_run:
+        return
+    host = os.environ.get("SMTP_HOST") or st.secrets.get("SMTP_HOST")
+    port = int(os.environ.get("SMTP_PORT") or st.secrets.get("SMTP_PORT", 587))
+    user = os.environ.get("SMTP_USER") or st.secrets.get("SMTP_USER")
+    pwd = os.environ.get("SMTP_PASS") or st.secrets.get("SMTP_PASS")
+    if not (host and user and pwd):
+        raise RuntimeError("SMTP 환경변수를 확인하세요.")
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = user
+    msg["To"] = to_addr
+    msg.add_alternative(html_body, subtype="html")
+
+    import smtplib
+
+    with smtplib.SMTP(host, port) as server:
+        server.starttls()
+        server.login(user, pwd)
+        server.send_message(msg)
+
+
+def build_vendor_email(vendor_name: str, vendor_df: pd.DataFrame, subject_tpl: str, body_tpl: str) -> Dict[str, str]:
+    mail_cols = [
+        c
+        for c in ["발주번호", "품목명", "발주수량", "미입고수량", "발주납기일자", "지연일수", "구매그룹"]
+        if c in vendor_df.columns
+    ]
+    items_table = vendor_df[mail_cols].to_html(index=False) if mail_cols else vendor_df.to_html(index=False)
+    placeholders = {
+        "vendor_name": vendor_name,
+        "today": datetime.now().strftime("%Y-%m-%d"),
+        "items_table": items_table,
+    }
+    subject = render_template(subject_tpl, placeholders)
+    body_html = render_template(body_tpl, placeholders)
+    return {"subject": subject, "body_html": body_html}
 
 # ─────────────── 엑셀 보고서 생성 (원본 test2.py 형식 유지) ───────────────
 def build_excel(summary, raw_df, prev_eom, curr_eom, det_prev, det_curr) -> bytes:
@@ -646,3 +804,165 @@ st.download_button(
     mime="text/csv",
 )
 st.caption("※ 업로드한 파일은 ./uploads 폴더에 저장됩니다. 히스토리에서 선택/삭제 가능합니다.")
+
+st.divider()
+st.subheader("📧 거래처별 미입고 메일 발송")
+st.caption("필터와 미입고 기준(당월말)으로 산출된 내역을 거래처별로 메일 전송합니다.")
+
+mail_df = detail_curr.copy()
+if "거래처이메일" not in mail_df.columns:
+    mail_df["거래처이메일"] = ""
+
+if mail_df.empty:
+    st.info("미입고 내역이 없어 메일을 보낼 수 없습니다.")
+else:
+    vendor_groups = (
+        mail_df.groupby(["거래처명", "거래처이메일"], dropna=False)
+        .agg(건수=("발주번호", "count"))
+        .reset_index()
+        .sort_values("건수", ascending=False)
+    )
+
+    st.markdown("**거래처별 미입고 건수 / 이메일 입력**")
+    if "vendor_email_inputs" not in st.session_state:
+        st.session_state.vendor_email_inputs = {}
+
+    email_master_df = load_vendor_email_master()
+    email_lookup = build_vendor_email_lookup(email_master_df)
+    source_email_map = (
+        vendor_groups.set_index("거래처명")["거래처이메일"].fillna("").astype(str).to_dict()
+        if not vendor_groups.empty
+        else {}
+    )
+
+    st.caption("vendor_emails.csv, secrets.toml(VENDOR_EMAILS) 를 모두 참조하여 이메일을 불러옵니다.")
+    cols_email = st.columns(2)
+    email_inputs: Dict[str, str] = {}
+    for idx, vendor in enumerate(vendor_groups["거래처명"].tolist()):
+        base_email = st.session_state.vendor_email_inputs.get(vendor, "")
+        if not base_email:
+            base_email = email_lookup.get(_norm_vendor(vendor), "")
+        if not base_email:
+            base_email = source_email_map.get(vendor, "")
+        with cols_email[idx % len(cols_email)]:
+            email_val = st.text_input(
+                f"{vendor}",
+                value=base_email,
+                key=f"vendor_email_input_{_norm_vendor(vendor)}",
+                help="누락된 이메일을 입력하거나 수정 후 저장하세요.",
+            ).strip()
+        st.session_state.vendor_email_inputs[vendor] = email_val
+        email_inputs[vendor] = email_val
+
+    invalid_rows = [
+        {"거래처": v, "이메일": e}
+        for v, e in email_inputs.items()
+        if e and not is_valid_email(e)
+    ]
+    if invalid_rows:
+        st.warning("형식이 잘못된 이메일이 있습니다. 확인 후 수정하세요.")
+        st.dataframe(pd.DataFrame(invalid_rows), use_container_width=True)
+
+    if st.button("이메일 저장"):
+        try:
+            rows = [{"vendor_name": v, "vendor_email": email_inputs.get(v, "")} for v in vendor_groups["거래처명"].tolist()]
+            pd.DataFrame(rows, columns=["vendor_name", "vendor_email"]).to_csv(
+                VENDOR_EMAIL_FILE, index=False, encoding="utf-8-sig"
+            )
+            st.success(f"{VENDOR_EMAIL_FILE.name} 저장 완료")
+            st.caption("저장 후 '⋮ → Clear cache and rerun'을 실행하면 반영됩니다.")
+        except Exception as e:
+            st.error(f"이메일 저장 중 오류: {e}")
+
+    resolved_email_map: Dict[str, str] = {}
+    for vendor in vendor_groups["거래처명"].tolist():
+        candidate = email_inputs.get(vendor, "")
+        if not candidate:
+            candidate = email_lookup.get(_norm_vendor(vendor), "")
+        if not candidate:
+            candidate = source_email_map.get(vendor, "")
+        resolved_email_map[vendor] = candidate.strip()
+
+    # 메일 발송 및 프리뷰에 사용될 DataFrame에도 최종 이메일을 반영
+    mail_df["거래처이메일"] = mail_df["거래처명"].map(resolved_email_map).fillna("")
+
+    st.subheader("이메일 템플릿")
+    default_subject = "[미입고 안내] {{vendor_name}} - {{today}} 기준"
+    default_body = (
+        "<p>안녕하세요, {{vendor_name}} 담당자님.</p>"
+        "<p>{{today}} 기준 미입고 내역을 공유드립니다. 확인 부탁드립니다.</p>"
+        "{{items_table}}"
+        "<p>문의사항이 있으시면 회신 부탁드립니다.</p>"
+    )
+    col_tpl1, col_tpl2 = st.columns([1, 1])
+    with col_tpl1:
+        subject_tpl = st.text_input("제목 템플릿", value=default_subject)
+    with col_tpl2:
+        dry_run = st.toggle("드라이런 모드 (발송 없이 로그만)", value=True)
+        delay = st.slider("건당 지연(초)", 0.0, 2.0, 0.0, 0.1)
+    body_tpl = st.text_area("본문 템플릿 (HTML 지원)", value=default_body, height=220,
+                           help="{{vendor_name}}, {{items_table}} 자리표시자를 사용할 수 있습니다.")
+
+    vendor_options = vendor_groups["거래처명"].tolist()
+    selected_vendors = st.multiselect("메일을 보낼 거래처 선택", vendor_options, default=vendor_options)
+
+    preview_vendor = st.selectbox("미리보기 거래처", vendor_options)
+    if st.button("미리보기", use_container_width=False):
+        vendor_df = mail_df[mail_df["거래처명"] == preview_vendor]
+        preview_email = build_vendor_email(preview_vendor, vendor_df, subject_tpl, body_tpl)
+        st.markdown(f"**제목:** {preview_email['subject']}")
+        st.markdown(preview_email["body_html"], unsafe_allow_html=True)
+
+    st.markdown("**메일 발송**")
+    col_send1, col_send2 = st.columns([1, 1])
+    result_rows: List[Dict[str, str]] = []
+
+    mail_table_cols = [
+        c
+        for c in ["발주번호", "품목명", "발주수량", "미입고수량", "발주납기일자", "지연일수", "구매그룹"]
+        if c in mail_df.columns
+    ]
+
+    def _send_to_targets(targets: List[str]):
+        target_list = [
+            (vendor, resolved_email_map.get(vendor, ""), mail_df[mail_df["거래처명"] == vendor])
+            for vendor in targets
+        ]
+        for vendor, email_addr, vendor_df in target_list:
+            status, detail = "성공", ""
+            if not is_valid_email(email_addr):
+                status, detail = "ERROR", "이메일 누락/형식 오류"
+            else:
+                items_table = vendor_df[mail_table_cols].to_html(index=False) if mail_table_cols else vendor_df.to_html(index=False)
+                placeholders = {
+                    "vendor_name": vendor,
+                    "items_table": items_table,
+                    "today": datetime.now().strftime("%Y-%m-%d"),
+                }
+                subject = render_template(subject_tpl, placeholders)
+                body = render_template(body_tpl, placeholders)
+                try:
+                    if dry_run:
+                        detail = "드라이런"
+                    else:
+                        channel = send_via_sendgrid(email_addr, subject, body)
+                        detail = f"발송 완료({channel})"
+                except Exception as e:
+                    status, detail = "ERROR", str(e)
+            result_rows.append({
+                "거래처": vendor,
+                "이메일": email_addr,
+                "결과": status,
+                "비고": detail,
+            })
+            if delay:
+                time.sleep(delay)
+
+    if col_send1.button("선택 업체에 메일 보내기", type="primary", disabled=not selected_vendors):
+        _send_to_targets(selected_vendors)
+    if col_send2.button("전체 업체에 메일 보내기", disabled=vendor_options == []):
+        _send_to_targets(vendor_options)
+
+    if result_rows:
+        st.success("메일 처리 결과")
+        st.dataframe(pd.DataFrame(result_rows), use_container_width=True)
