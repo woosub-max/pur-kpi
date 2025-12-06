@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-미입고 KPI 대시보드 (Streamlit · Robust Reader · 업로드 히스토리 '영구 저장' + 삭제 버튼)
-- 더존 발주현황 업로드 → KPI/차트/필터 → 엑셀 보고서(요약+상세+원본) 다운로드
-- 업로드 히스토리: ./uploads 폴더에 파일을 저장해 '재접속해도' 목록에서 선택/삭제 가능
-- 다중 업로드 가능(동일 파일명은 최신본으로 치환), 선택 삭제 버튼 제공
-- 본문 로직은 기존 test2.py를 토대로 보강(파일 저장/불러오기만 추가)
+미발주/미입고 대시보드 (Streamlit · Robust Reader · 업로드 히스토리 '영구 저장' + 삭제 버튼)
+ - 더존 발주현황 업로드 → KPI/차트/필터 → 엑셀 보고서(요약+상세+원본) 다운로드
+ - 업로드 히스토리: ./uploads 폴더에 파일을 저장해 '재접속해도' 목록에서 선택/삭제 가능
+ - 다중 업로드 가능(동일 파일명은 최신본으로 치환), 선택 삭제 버튼 제공
+ - 본문 로직은 기존 test2.py를 토대로 보강(파일 저장/불러오기만 추가)
 """
 
 import io, os, csv, calendar, time, json, re
@@ -24,7 +24,7 @@ def halt_app():
         raise SystemExit(0)
 
 # ───────────────────────── 기본 설정 ─────────────────────────
-st.set_page_config(page_title="미입고 KPI 대시보드(Pro)", page_icon="📦", layout="wide")
+st.set_page_config(page_title="미발주/미입고 대시보드(Pro)", page_icon="📦", layout="wide")
 
 ROOT_DIR   = Path(__file__).parent if "__file__" in globals() else Path(".")
 UPLOAD_DIR = ROOT_DIR / "uploads"
@@ -469,7 +469,7 @@ PARTIAL  = set(s.strip() for s in part_str.split(",") if s.strip())
 OPEN     = set(s.strip() for s in open_str.split(",") if s.strip())
 OPEN_OR_PARTIAL = OPEN | PARTIAL
 
-st.title("📊 미입고 KPI 대시보드")
+st.title("📊 미발주/미입고 대시보드")
 
 # ───────────────────────── 데이터 로딩 ─────────────────────────
 def read_path(path: Path) -> pd.DataFrame:
