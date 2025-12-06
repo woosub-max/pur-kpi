@@ -16,6 +16,8 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
 
 
 def halt_app():
@@ -361,6 +363,31 @@ def is_valid_email(address: str) -> bool:
     return re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", address) is not None
 
 
+def send_via_sendgrid(to_addr: str, subject: str, html_body: str) -> str:
+    """SendGrid로 메일 전송 (성공 시 OK 반환)"""
+    if not is_valid_email(to_addr):
+        raise ValueError(f"잘못된 이메일 주소: {to_addr}")
+
+    api_key = st.secrets.get("SENDGRID_API_KEY") or os.environ.get("SENDGRID_API_KEY")
+    sender = (
+        st.secrets.get("SENDER_EMAIL")
+        or os.environ.get("SENDER_EMAIL")
+        or st.secrets.get("SMTP_USER")
+        or os.environ.get("SMTP_USER")
+    )
+
+    if not api_key:
+        raise RuntimeError("SENDGRID_API_KEY가 설정되지 않았습니다.")
+    if not sender:
+        raise RuntimeError("SENDER_EMAIL이 설정되지 않았습니다.")
+
+    msg = Mail(from_email=sender, to_emails=[to_addr], subject=subject, html_content=html_body)
+    resp = SendGridAPIClient(api_key).send(msg)
+    if resp.status_code >= 300:
+        raise RuntimeError(f"SendGrid 응답 오류: {resp.status_code}")
+    return "OK"
+
+
 def build_items_table(df: pd.DataFrame) -> str:
     if df.empty:
         return "<p>미입고 내역이 없습니다.</p>"
@@ -413,10 +440,16 @@ def send_email(to_addr: str, subject: str, html_body: str, dry_run: bool = True)
 
 
 def build_vendor_email(vendor_name: str, vendor_df: pd.DataFrame, subject_tpl: str, body_tpl: str) -> Dict[str, str]:
+    mail_cols = [
+        c
+        for c in ["발주번호", "품목명", "발주수량", "미입고수량", "발주납기일자", "지연일수", "구매그룹"]
+        if c in vendor_df.columns
+    ]
+    items_table = vendor_df[mail_cols].to_html(index=False) if mail_cols else vendor_df.to_html(index=False)
     placeholders = {
         "vendor_name": vendor_name,
         "today": datetime.now().strftime("%Y-%m-%d"),
-        "items_table": build_items_table(vendor_df),
+        "items_table": items_table,
     }
     subject = render_template(subject_tpl, placeholders)
     body_html = render_template(body_tpl, placeholders)
@@ -805,6 +838,12 @@ else:
     col_send1, col_send2 = st.columns([1, 1])
     result_rows: List[Dict[str, str]] = []
 
+    mail_table_cols = [
+        c
+        for c in ["발주번호", "품목명", "발주수량", "미입고수량", "발주납기일자", "지연일수", "구매그룹"]
+        if c in mail_df.columns
+    ]
+
     def _send_to_targets(targets: List[str]):
         for vendor in targets:
             vendor_df = mail_df[mail_df["거래처명"] == vendor]
@@ -815,10 +854,20 @@ else:
             if not is_valid_email(email_addr):
                 status, detail = "건너뜀", "이메일 누락/형식 오류"
             else:
-                email_payload = build_vendor_email(vendor, vendor_df, subject_tpl, body_tpl)
+                items_table = vendor_df[mail_table_cols].to_html(index=False) if mail_table_cols else vendor_df.to_html(index=False)
+                placeholders = {
+                    "vendor_name": vendor,
+                    "items_table": items_table,
+                    "today": datetime.now().strftime("%Y-%m-%d"),
+                }
+                subject = render_template(subject_tpl, placeholders)
+                body = render_template(body_tpl, placeholders)
                 try:
-                    send_email(email_addr, email_payload["subject"], email_payload["body_html"], dry_run=dry_run)
-                    detail = "드라이런" if dry_run else "발송 완료"
+                    if dry_run:
+                        detail = "드라이런"
+                    else:
+                        channel = send_via_sendgrid(email_addr, subject, body)
+                        detail = f"발송 완료({channel})"
                 except Exception as e:
                     status, detail = "실패", str(e)
             result_rows.append({
