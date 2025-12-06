@@ -8,3 +8,4 @@ pyxlsb
 lxml
 beautifulsoup4
 html5lib
+sendgrid
