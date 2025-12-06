@@ -33,6 +33,7 @@ st.set_page_config(page_title="미발주/미입고 대시보드(Pro)", page_icon
 ROOT_DIR   = Path(__file__).parent if "__file__" in globals() else Path(".")
 UPLOAD_DIR = ROOT_DIR / "uploads"
 MANIFEST   = UPLOAD_DIR / "manifest.json"
+VENDOR_EMAIL_FILE = ROOT_DIR / "vendor_emails.csv"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 def month_end(d: date) -> date:
@@ -361,6 +362,51 @@ def is_valid_email(address: str) -> bool:
     if not address:
         return False
     return re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", address) is not None
+
+
+def _norm_vendor(name: str) -> str:
+    if not isinstance(name, str):
+        return ""
+    s = name.lower()
+    s = re.sub(r"\s+", "", s)
+    s = s.replace("주식회사", "").replace("㈜", "")
+    s = re.sub(r"^\(주\)", "", s)
+    s = re.sub(r"[^가-힣a-z0-9]", "", s)
+    return s
+
+
+def load_vendor_email_master() -> pd.DataFrame:
+    if not VENDOR_EMAIL_FILE.exists():
+        return pd.DataFrame(columns=["vendor_name", "vendor_email"])
+    try:
+        df = pd.read_csv(VENDOR_EMAIL_FILE)
+        if "vendor_name" not in df.columns and df.shape[1] >= 1:
+            df.rename(columns={df.columns[0]: "vendor_name"}, inplace=True)
+        if "vendor_email" not in df.columns and df.shape[1] >= 2:
+            df.rename(columns={df.columns[1]: "vendor_email"}, inplace=True)
+        cols = [c for c in ["vendor_name", "vendor_email"] if c in df.columns]
+        if len(cols) < 2:
+            return pd.DataFrame(columns=["vendor_name", "vendor_email"])
+        return df[cols].fillna("")
+    except Exception:
+        return pd.DataFrame(columns=["vendor_name", "vendor_email"])
+
+
+def build_vendor_email_lookup(master_df: pd.DataFrame) -> Dict[str, str]:
+    lookup: Dict[str, str] = {}
+    for _, row in master_df.iterrows():
+        nm = _norm_vendor(str(row.get("vendor_name", "")))
+        em = str(row.get("vendor_email", "")).strip()
+        if nm and em:
+            lookup[nm] = em
+    secret_map = st.secrets.get("VENDOR_EMAILS", {}) if hasattr(st, "secrets") else {}
+    if isinstance(secret_map, dict):
+        for k, v in secret_map.items():
+            nm = _norm_vendor(str(k))
+            em = str(v).strip()
+            if nm and em:
+                lookup[nm] = em
+    return lookup
 
 
 def send_via_sendgrid(to_addr: str, subject: str, html_body: str) -> str:
@@ -778,34 +824,64 @@ else:
     )
 
     st.markdown("**거래처별 미입고 건수 / 이메일 입력**")
-    if "vendor_email_overrides" not in st.session_state:
-        st.session_state.vendor_email_overrides = {}
+    if "vendor_email_inputs" not in st.session_state:
+        st.session_state.vendor_email_inputs = {}
 
-    editable_df = vendor_groups.copy()
-    editable_df["이메일"] = editable_df["거래처명"].map(st.session_state.vendor_email_overrides).fillna(editable_df["거래처이메일"])
-    editable_df = editable_df[["거래처명", "이메일", "건수", "거래처이메일"]]
-
-    edited_df = st.data_editor(
-        editable_df,
-        use_container_width=True,
-        hide_index=True,
-        key="vendor_email_editor",
-        column_config={
-            "거래처명": st.column_config.TextColumn(disabled=True),
-            "건수": st.column_config.NumberColumn(disabled=True),
-            "거래처이메일": st.column_config.TextColumn(disabled=True, label="원본 이메일"),
-            "이메일": st.column_config.TextColumn(help="이메일이 없거나 수정이 필요한 경우 입력하세요."),
-        },
+    email_master_df = load_vendor_email_master()
+    email_lookup = build_vendor_email_lookup(email_master_df)
+    source_email_map = (
+        vendor_groups.set_index("거래처명")["거래처이메일"].fillna("").astype(str).to_dict()
+        if not vendor_groups.empty
+        else {}
     )
 
-    email_map: Dict[str, str] = {}
-    for _, row in edited_df.iterrows():
-        email_val = str(row.get("이메일", "")).strip()
-        if email_val:
-            st.session_state.vendor_email_overrides[row["거래처명"]] = email_val
-            email_map[row["거래처명"]] = email_val
-        else:
-            email_map[row["거래처명"]] = str(row.get("거래처이메일", "")).strip()
+    st.caption("vendor_emails.csv, secrets.toml(VENDOR_EMAILS) 를 모두 참조하여 이메일을 불러옵니다.")
+    cols_email = st.columns(2)
+    email_inputs: Dict[str, str] = {}
+    for idx, vendor in enumerate(vendor_groups["거래처명"].tolist()):
+        base_email = st.session_state.vendor_email_inputs.get(vendor, "")
+        if not base_email:
+            base_email = email_lookup.get(_norm_vendor(vendor), "")
+        if not base_email:
+            base_email = source_email_map.get(vendor, "")
+        with cols_email[idx % len(cols_email)]:
+            email_val = st.text_input(
+                f"{vendor}",
+                value=base_email,
+                key=f"vendor_email_input_{_norm_vendor(vendor)}",
+                help="누락된 이메일을 입력하거나 수정 후 저장하세요.",
+            ).strip()
+        st.session_state.vendor_email_inputs[vendor] = email_val
+        email_inputs[vendor] = email_val
+
+    invalid_rows = [
+        {"거래처": v, "이메일": e}
+        for v, e in email_inputs.items()
+        if e and not is_valid_email(e)
+    ]
+    if invalid_rows:
+        st.warning("형식이 잘못된 이메일이 있습니다. 확인 후 수정하세요.")
+        st.dataframe(pd.DataFrame(invalid_rows), use_container_width=True)
+
+    if st.button("이메일 저장"):
+        try:
+            rows = [{"vendor_name": v, "vendor_email": email_inputs.get(v, "")} for v in vendor_groups["거래처명"].tolist()]
+            pd.DataFrame(rows, columns=["vendor_name", "vendor_email"]).to_csv(
+                VENDOR_EMAIL_FILE, index=False, encoding="utf-8-sig"
+            )
+            st.success(f"{VENDOR_EMAIL_FILE.name} 저장 완료")
+            st.caption("저장 후 '⋮ → Clear cache and rerun'을 실행하면 반영됩니다.")
+        except Exception as e:
+            st.error(f"이메일 저장 중 오류: {e}")
+
+    resolved_email_map: Dict[str, str] = {}
+    for vendor in vendor_groups["거래처명"].tolist():
+        candidate = email_inputs.get(vendor, "")
+        if not candidate:
+            candidate = email_lookup.get(_norm_vendor(vendor), "")
+        if not candidate:
+            candidate = source_email_map.get(vendor, "")
+        resolved_email_map[vendor] = candidate.strip()
 
     st.subheader("이메일 템플릿")
     default_subject = "[미입고 안내] {{vendor_name}} - {{today}} 기준"
@@ -845,14 +921,14 @@ else:
     ]
 
     def _send_to_targets(targets: List[str]):
-        for vendor in targets:
-            vendor_df = mail_df[mail_df["거래처명"] == vendor]
-            email_addr = email_map.get(vendor) or st.session_state.vendor_email_overrides.get(vendor)
-            if not email_addr:
-                email_addr = vendor_df["거래처이메일"].dropna().astype(str).str.strip().iloc[0] if not vendor_df.empty else ""
+        target_list = [
+            (vendor, resolved_email_map.get(vendor, ""), mail_df[mail_df["거래처명"] == vendor])
+            for vendor in targets
+        ]
+        for vendor, email_addr, vendor_df in target_list:
             status, detail = "성공", ""
             if not is_valid_email(email_addr):
-                status, detail = "건너뜀", "이메일 누락/형식 오류"
+                status, detail = "ERROR", "이메일 누락/형식 오류"
             else:
                 items_table = vendor_df[mail_table_cols].to_html(index=False) if mail_table_cols else vendor_df.to_html(index=False)
                 placeholders = {
@@ -869,7 +945,7 @@ else:
                         channel = send_via_sendgrid(email_addr, subject, body)
                         detail = f"발송 완료({channel})"
                 except Exception as e:
-                    status, detail = "실패", str(e)
+                    status, detail = "ERROR", str(e)
             result_rows.append({
                 "거래처": vendor,
                 "이메일": email_addr,
